@@ -89,6 +89,15 @@ pub(crate) const PSBT_IN_SP_ECDH_SHARE: u8 = 0x1D;
 #[cfg(feature = "silent-payments")]
 /// Type: Silent Payment DLEQ Proof PSBT_IN_SP_DLEQ = 0x1E
 pub(crate) const PSBT_IN_SP_DLEQ: u8 = 0x1E;
+#[cfg(feature = "musig2")]
+/// Type: BIP-373 MuSig2 Participant Pubkeys PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS = 0x1A
+pub(crate) const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: u8 = 0x1A;
+#[cfg(feature = "musig2")]
+/// Type: BIP-373 MuSig2 Public Nonce PSBT_IN_MUSIG2_PUB_NONCE = 0x1B
+pub(crate) const PSBT_IN_MUSIG2_PUB_NONCE: u8 = 0x1B;
+#[cfg(feature = "musig2")]
+/// Type: BIP-373 MuSig2 Partial Signature PSBT_IN_MUSIG2_PARTIAL_SIG = 0x1C
+pub(crate) const PSBT_IN_MUSIG2_PARTIAL_SIG: u8 = 0x1C;
 /// Type: Proprietary Use Type PSBT_IN_PROPRIETARY = 0xFC
 pub(crate) const PSBT_IN_PROPRIETARY: u8 = 0xFC;
 
@@ -114,6 +123,10 @@ pub(crate) const PSBT_OUT_SP_V0_INFO: u8 = 0x09;
 #[cfg(feature = "silent-payments")]
 /// Type: Silent Payment v0 Label PSBT_OUT_SP_V0_LABEL = 0x0A
 pub(crate) const PSBT_OUT_SP_V0_LABEL: u8 = 0x0A;
+#[cfg(feature = "musig2")]
+/// Type: BIP-373 MuSig2 Participant Pubkeys PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS = 0x08
+/// Note: 0x08 in output map only; does not conflict with PSBT_GLOBAL_SP_DLEQ (different map).
+pub(crate) const PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS: u8 = 0x08;
 /// Type: Proprietary Use Type PSBT_IN_PROPRIETARY = 0xFC
 pub(crate) const PSBT_OUT_PROPRIETARY: u8 = 0xFC;
 
@@ -169,6 +182,12 @@ pub(crate) fn psbt_in_key_type_value_to_str(v: u8) -> &'static str {
         PSBT_IN_SP_ECDH_SHARE => "PSBT_IN_SP_ECDH_SHARE",
         #[cfg(feature = "silent-payments")]
         PSBT_IN_SP_DLEQ => "PSBT_IN_SP_DLEQ",
+        #[cfg(feature = "musig2")]
+        PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS => "PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS",
+        #[cfg(feature = "musig2")]
+        PSBT_IN_MUSIG2_PUB_NONCE => "PSBT_IN_MUSIG2_PUB_NONCE",
+        #[cfg(feature = "musig2")]
+        PSBT_IN_MUSIG2_PARTIAL_SIG => "PSBT_IN_MUSIG2_PARTIAL_SIG",
         PSBT_IN_PROPRIETARY => "PSBT_IN_PROPRIETARY",
         _ => "unknown PSBT_IN_ key type value",
     }
@@ -189,6 +208,8 @@ pub(crate) fn psbt_out_key_type_value_to_str(v: u8) -> &'static str {
         PSBT_OUT_SP_V0_INFO => "PSBT_OUT_SP_V0_INFO",
         #[cfg(feature = "silent-payments")]
         PSBT_OUT_SP_V0_LABEL => "PSBT_OUT_SP_V0_LABEL",
+        #[cfg(feature = "musig2")]
+        PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS => "PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS",
         PSBT_OUT_PROPRIETARY => "PSBT_OUT_PROPRIETARY",
         _ => "unknown PSBT_OUT_ key type value",
     }

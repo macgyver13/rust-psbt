@@ -7,8 +7,12 @@ use bitcoin::bip32::KeySource;
 use bitcoin::io::BufRead;
 use bitcoin::key::XOnlyPublicKey;
 use bitcoin::taproot::{TapLeafHash, TapTree};
+#[cfg(feature = "musig2")]
+use bitcoin::CompressedPublicKey;
 use bitcoin::{secp256k1, Amount, ScriptBuf, TxOut};
 
+#[cfg(feature = "musig2")]
+use crate::consts::PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS;
 use crate::consts::{
     PSBT_OUT_AMOUNT, PSBT_OUT_BIP32_DERIVATION, PSBT_OUT_PROPRIETARY, PSBT_OUT_REDEEM_SCRIPT,
     PSBT_OUT_SCRIPT, PSBT_OUT_TAP_BIP32_DERIVATION, PSBT_OUT_TAP_INTERNAL_KEY, PSBT_OUT_TAP_TREE,
@@ -57,6 +61,12 @@ pub struct Output {
     #[cfg(feature = "silent-payments")]
     pub sp_v0_label: Option<u32>,
 
+    /// BIP-373: Map from aggregate pubkey (33B) to concatenated participant pubkeys (N*33B).
+    /// Used for change output detection in MuSig2 signing.
+    #[cfg(feature = "musig2")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_utils::btreemap_as_seq_byte_values"))]
+    pub musig2_participant_pubkeys: BTreeMap<CompressedPublicKey, Vec<u8>>,
+
     /// Proprietary key-value pairs for this output.
     #[cfg_attr(feature = "serde", serde(with = "crate::serde_utils::btreemap_as_seq_byte_values"))]
     pub proprietaries: BTreeMap<raw::ProprietaryKey, Vec<u8>>,
@@ -81,6 +91,8 @@ impl Output {
             sp_v0_info: None,
             #[cfg(feature = "silent-payments")]
             sp_v0_label: None,
+            #[cfg(feature = "musig2")]
+            musig2_participant_pubkeys: BTreeMap::new(),
             proprietaries: BTreeMap::new(),
             unknowns: BTreeMap::new(),
         }
@@ -230,6 +242,32 @@ impl Output {
                     u32::from_le_bytes([raw_value[0], raw_value[1], raw_value[2], raw_value[3]]);
                 self.sp_v0_label = Some(label);
             }
+            #[cfg(feature = "musig2")]
+            PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS => {
+                // Key: 33-byte aggregate pubkey. Value: N*33 participant pubkeys.
+                if raw_key.key.len() != 33 {
+                    return Err(InsertPairError::Deser(
+                        serialize::Error::InvalidSecp256k1PublicKey(
+                            secp256k1::Error::InvalidPublicKey,
+                        ),
+                    ));
+                }
+                if raw_value.is_empty() || raw_value.len() % 33 != 0 {
+                    return Err(InsertPairError::ValueWrongLength(raw_value.len(), 33));
+                }
+                let agg_key = CompressedPublicKey::from_slice(&raw_key.key).map_err(|e| {
+                    InsertPairError::Deser(serialize::Error::InvalidPublicKey(
+                        bitcoin::key::FromSliceError::Secp256k1(e),
+                    ))
+                })?;
+                match self.musig2_participant_pubkeys.entry(agg_key) {
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(raw_value);
+                    }
+                    btree_map::Entry::Occupied(_) =>
+                        return Err(InsertPairError::DuplicateKey(raw_key)),
+                }
+            }
             // Note, PSBT v2 does not exclude any keys from the input map.
             _ => match self.unknowns.entry(raw_key) {
                 btree_map::Entry::Vacant(empty_key) => {
@@ -266,6 +304,8 @@ impl Output {
         v2_combine_option!(sp_v0_info, self, other);
         #[cfg(feature = "silent-payments")]
         v2_combine_option!(sp_v0_label, self, other);
+        #[cfg(feature = "musig2")]
+        v2_combine_map!(musig2_participant_pubkeys, self, other);
         v2_combine_map!(proprietaries, self, other);
         v2_combine_map!(unknowns, self, other);
 
@@ -324,6 +364,17 @@ impl Map for Output {
             rv.push(raw::Pair {
                 key: raw::Key { type_value: PSBT_OUT_SP_V0_LABEL, key: vec![] },
                 value: label.to_le_bytes().to_vec(),
+            });
+        }
+
+        #[cfg(feature = "musig2")]
+        for (agg_key, participants) in &self.musig2_participant_pubkeys {
+            rv.push(raw::Pair {
+                key: raw::Key {
+                    type_value: PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS,
+                    key: agg_key.to_bytes().to_vec(),
+                },
+                value: participants.clone(),
             });
         }
 
