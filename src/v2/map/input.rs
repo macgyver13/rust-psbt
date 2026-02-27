@@ -11,7 +11,7 @@ use bitcoin::key::{PublicKey, XOnlyPublicKey};
 use bitcoin::locktime::absolute;
 use bitcoin::sighash::{EcdsaSighashType, NonStandardSighashTypeError, TapSighashType};
 use bitcoin::taproot::{ControlBlock, LeafVersion, TapLeafHash, TapNodeHash};
-#[cfg(feature = "silent-payments")]
+#[cfg(any(feature = "silent-payments", feature = "musig2"))]
 use bitcoin::CompressedPublicKey;
 use bitcoin::{
     ecdsa, hashes, taproot, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
@@ -25,6 +25,10 @@ use crate::consts::{
     PSBT_IN_SEQUENCE, PSBT_IN_SHA256, PSBT_IN_SIGHASH_TYPE, PSBT_IN_TAP_BIP32_DERIVATION,
     PSBT_IN_TAP_INTERNAL_KEY, PSBT_IN_TAP_KEY_SIG, PSBT_IN_TAP_LEAF_SCRIPT,
     PSBT_IN_TAP_MERKLE_ROOT, PSBT_IN_TAP_SCRIPT_SIG, PSBT_IN_WITNESS_SCRIPT, PSBT_IN_WITNESS_UTXO,
+};
+#[cfg(feature = "musig2")]
+use crate::consts::{
+    PSBT_IN_MUSIG2_PARTIAL_SIG, PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS, PSBT_IN_MUSIG2_PUB_NONCE,
 };
 #[cfg(feature = "silent-payments")]
 use crate::consts::{PSBT_IN_SP_DLEQ, PSBT_IN_SP_ECDH_SHARE};
@@ -130,6 +134,22 @@ pub struct Input {
     #[cfg_attr(feature = "serde", serde(with = "crate::serde_utils::btreemap_as_seq"))]
     pub sp_dleq_proofs: BTreeMap<CompressedPublicKey, DleqProof>,
 
+    /// BIP-373: Map from aggregate pubkey (33B) to concatenated participant pubkeys (N*33B).
+    /// Key: compressed aggregate pubkey. Value: participant pubkeys concatenated.
+    #[cfg(feature = "musig2")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_utils::btreemap_as_seq_byte_values"))]
+    pub musig2_participant_pubkeys: BTreeMap<CompressedPublicKey, Vec<u8>>,
+
+    /// BIP-373: Map from (participant_pk || aggregate_pk) (66B) to 66-byte public nonce.
+    #[cfg(feature = "musig2")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_utils::btreemap_as_seq_byte_values"))]
+    pub musig2_pub_nonces: BTreeMap<Vec<u8>, Vec<u8>>,
+
+    /// BIP-373: Map from (participant_pk || aggregate_pk) (66B) to 32-byte partial sig scalar.
+    #[cfg(feature = "musig2")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_utils::btreemap_as_seq_byte_values"))]
+    pub musig2_partial_sigs: BTreeMap<Vec<u8>, Vec<u8>>,
+
     /// Proprietary key-value pairs for this input.
     #[cfg_attr(feature = "serde", serde(with = "crate::serde_utils::btreemap_as_seq_byte_values"))]
     pub proprietaries: BTreeMap<raw::ProprietaryKey, Vec<u8>>,
@@ -170,6 +190,12 @@ impl Input {
             sp_ecdh_shares: BTreeMap::new(),
             #[cfg(feature = "silent-payments")]
             sp_dleq_proofs: BTreeMap::new(),
+            #[cfg(feature = "musig2")]
+            musig2_participant_pubkeys: BTreeMap::new(),
+            #[cfg(feature = "musig2")]
+            musig2_pub_nonces: BTreeMap::new(),
+            #[cfg(feature = "musig2")]
+            musig2_partial_sigs: BTreeMap::new(),
             proprietaries: BTreeMap::new(),
             unknowns: BTreeMap::new(),
         }
@@ -252,6 +278,12 @@ impl Input {
             sp_ecdh_shares: BTreeMap::new(),
             #[cfg(feature = "silent-payments")]
             sp_dleq_proofs: BTreeMap::new(),
+            #[cfg(feature = "musig2")]
+            musig2_participant_pubkeys: BTreeMap::new(),
+            #[cfg(feature = "musig2")]
+            musig2_pub_nonces: BTreeMap::new(),
+            #[cfg(feature = "musig2")]
+            musig2_partial_sigs: BTreeMap::new(),
             proprietaries: BTreeMap::new(),
             unknowns: BTreeMap::new(),
         };
@@ -579,6 +611,62 @@ impl Input {
             PSBT_IN_SP_DLEQ => {
                 v2_impl_psbt_insert_sp_pair!(self.sp_dleq_proofs, raw_key, raw_value, dleq_proof);
             }
+            #[cfg(feature = "musig2")]
+            PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS => {
+                // Key: 33-byte aggregate pubkey. Value: N*33 participant pubkeys.
+                if raw_key.key.len() != 33 {
+                    return Err(InsertPairError::KeyWrongLength(raw_key.key.len(), 33));
+                }
+                if raw_value.is_empty() || raw_value.len() % 33 != 0 {
+                    return Err(InsertPairError::ValueWrongLength(raw_value.len(), 33));
+                }
+                let agg_key = CompressedPublicKey::from_slice(&raw_key.key).map_err(|e| {
+                    InsertPairError::Deser(serialize::Error::InvalidPublicKey(
+                        bitcoin::key::FromSliceError::Secp256k1(e),
+                    ))
+                })?;
+                match self.musig2_participant_pubkeys.entry(agg_key) {
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(raw_value);
+                    }
+                    btree_map::Entry::Occupied(_) =>
+                        return Err(InsertPairError::DuplicateKey(raw_key)),
+                }
+            }
+            #[cfg(feature = "musig2")]
+            PSBT_IN_MUSIG2_PUB_NONCE => {
+                // Key: participant_pk (33B) || aggregate_pk (33B) = 66 bytes. Value: 66-byte nonce.
+                if raw_key.key.len() != 66 {
+                    return Err(InsertPairError::KeyWrongLength(raw_key.key.len(), 66));
+                }
+                if raw_value.len() != 66 {
+                    return Err(InsertPairError::ValueWrongLength(raw_value.len(), 66));
+                }
+                match self.musig2_pub_nonces.entry(raw_key.key.clone()) {
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(raw_value);
+                    }
+                    btree_map::Entry::Occupied(_) =>
+                        return Err(InsertPairError::DuplicateKey(raw_key)),
+                }
+            }
+            #[cfg(feature = "musig2")]
+            PSBT_IN_MUSIG2_PARTIAL_SIG => {
+                // Key: participant_pk (33B) || aggregate_pk (33B) = 66 bytes. Value: 32-byte scalar.
+                if raw_key.key.len() != 66 {
+                    return Err(InsertPairError::KeyWrongLength(raw_key.key.len(), 66));
+                }
+                if raw_value.len() != 32 {
+                    return Err(InsertPairError::ValueWrongLength(raw_value.len(), 32));
+                }
+                match self.musig2_partial_sigs.entry(raw_key.key.clone()) {
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(raw_value);
+                    }
+                    btree_map::Entry::Occupied(_) =>
+                        return Err(InsertPairError::DuplicateKey(raw_key)),
+                }
+            }
             PSBT_IN_PROPRIETARY => {
                 let key = raw::ProprietaryKey::try_from(raw_key.clone())?;
                 match self.proprietaries.entry(key) {
@@ -651,6 +739,12 @@ impl Input {
         v2_combine_map!(sp_ecdh_shares, self, other);
         #[cfg(feature = "silent-payments")]
         v2_combine_map!(sp_dleq_proofs, self, other);
+        #[cfg(feature = "musig2")]
+        v2_combine_map!(musig2_participant_pubkeys, self, other);
+        #[cfg(feature = "musig2")]
+        v2_combine_map!(musig2_pub_nonces, self, other);
+        #[cfg(feature = "musig2")]
+        v2_combine_map!(musig2_partial_sigs, self, other);
         v2_combine_map!(proprietaries, self, other);
         v2_combine_map!(unknowns, self, other);
 
@@ -774,6 +868,33 @@ impl Map for Input {
             rv.push(raw::Pair {
                 key: raw::Key { type_value: PSBT_IN_SP_DLEQ, key: scan_key.to_bytes().to_vec() },
                 value: dleq_proof.as_bytes().to_vec(),
+            });
+        }
+
+        #[cfg(feature = "musig2")]
+        for (agg_key, participants) in &self.musig2_participant_pubkeys {
+            rv.push(raw::Pair {
+                key: raw::Key {
+                    type_value: PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS,
+                    key: agg_key.to_bytes().to_vec(),
+                },
+                value: participants.clone(),
+            });
+        }
+
+        #[cfg(feature = "musig2")]
+        for (compound_key, nonce) in &self.musig2_pub_nonces {
+            rv.push(raw::Pair {
+                key: raw::Key { type_value: PSBT_IN_MUSIG2_PUB_NONCE, key: compound_key.clone() },
+                value: nonce.clone(),
+            });
+        }
+
+        #[cfg(feature = "musig2")]
+        for (compound_key, partial_sig) in &self.musig2_partial_sigs {
+            rv.push(raw::Pair {
+                key: raw::Key { type_value: PSBT_IN_MUSIG2_PARTIAL_SIG, key: compound_key.clone() },
+                value: partial_sig.clone(),
             });
         }
 

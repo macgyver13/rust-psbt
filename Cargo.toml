@@ -38,6 +38,7 @@ serde = ["dep:serde", "bitcoin/serde"]
 base64 = ["bitcoin/base64"]
 miniscript = ["dep:miniscript", "miniscript?/no-std"]
 silent-payments = [] # Silent Payments support
+musig2 = [] # MuSig2 support
 
 [dependencies]
 bitcoin = { version = "0.32.8", default-features = false }
