@@ -282,10 +282,12 @@ impl Map for Output {
             value: self.amount.serialize(),
         });
 
-        rv.push(raw::Pair {
-            key: raw::Key { type_value: PSBT_OUT_SCRIPT, key: vec![] },
-            value: self.script_pubkey.serialize(),
-        });
+        if self.script_pubkey != ScriptBuf::default() {
+            rv.push(raw::Pair {
+                key: raw::Key { type_value: PSBT_OUT_SCRIPT, key: vec![] },
+                value: self.script_pubkey.serialize(),
+            });
+        }
 
         v2_impl_psbt_get_pair! {
             rv.push(self.redeem_script, PSBT_OUT_REDEEM_SCRIPT)
